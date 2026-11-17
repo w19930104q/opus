@@ -30,6 +30,12 @@ bridge_decoder_get_last_packet_duration(OpusDecoder *st, opus_int32 *samples)
 {
 	return opus_decoder_ctl(st, OPUS_GET_LAST_PACKET_DURATION(samples));
 }
+
+int
+bridge_decoder_reset_state(OpusDecoder *st)
+{
+	return opus_decoder_ctl(st, OPUS_RESET_STATE);
+}
 */
 import "C"
 
@@ -41,6 +47,10 @@ type Decoder struct {
 	mem         []byte
 	sample_rate int
 	channels    int
+	// state_version is incremented every time the underlying libopus state
+	// is (re)initialized or reset. It lets callers detect that all prediction
+	// and FEC/PLC history has been dropped.
+	state_version uint64
 }
 
 // NewDecoder allocates a new Opus decoder and initializes it with the
@@ -62,22 +72,31 @@ func (dec *Decoder) Init(sample_rate int, channels int) error {
 		return fmt.Errorf("Number of channels must be 1 or 2: %d", channels)
 	}
 	size := C.opus_decoder_get_size(C.int(channels))
-	dec.sample_rate = sample_rate
-	dec.channels = channels
-	dec.mem = make([]byte, size)
-	dec.p = (*C.OpusDecoder)(unsafe.Pointer(&dec.mem[0]))
+	// Initialize off to the side and only commit to the receiver once
+	// libopus reports success. A failed Init must leave the decoder
+	// untouched (and retryable), not half-initialized.
+	mem := make([]byte, size)
+	p := (*C.OpusDecoder)(unsafe.Pointer(&mem[0]))
 	errno := C.opus_decoder_init(
-		dec.p,
+		p,
 		C.opus_int32(sample_rate),
 		C.int(channels))
 	if errno != 0 {
 		return Error(errno)
 	}
+	dec.p = p
+	dec.mem = mem
+	dec.sample_rate = sample_rate
+	dec.channels = channels
+	dec.state_version++
 	return nil
 }
 
 // SetComplexity sets the decoder's computational complexity
 func (dec *Decoder) SetComplexity(complexity int) error {
+	if dec.p == nil {
+		return errDecUninitialized
+	}
 	res := C.bridge_decoder_set_complexity(dec.p, C.opus_int32(complexity))
 	if res != C.OPUS_OK {
 		return Error(res)
@@ -87,6 +106,9 @@ func (dec *Decoder) SetComplexity(complexity int) error {
 
 // Complexity returns the computational complexity used by the decoder
 func (dec *Decoder) Complexity() (int, error) {
+	if dec.p == nil {
+		return 0, errDecUninitialized
+	}
 	var complexity C.opus_int32
 	res := C.bridge_decoder_get_complexity(dec.p, &complexity)
 	if res != C.OPUS_OK {
@@ -284,10 +306,38 @@ func (dec *Decoder) DecodePLCFloat32(pcm []float32) error {
 // LastPacketDuration gets the duration (in samples)
 // of the last packet successfully decoded or concealed.
 func (dec *Decoder) LastPacketDuration() (int, error) {
+	if dec.p == nil {
+		return 0, errDecUninitialized
+	}
 	var samples C.opus_int32
 	res := C.bridge_decoder_get_last_packet_duration(dec.p, &samples)
 	if res != C.OPUS_OK {
 		return 0, Error(res)
 	}
 	return int(samples), nil
+}
+
+// Reset resets the decoder state to be equivalent to a freshly initialized
+// state. All prediction and FEC/PLC history accumulated from previously
+// decoded packets is dropped. Use this when switching to a new Opus stream
+// with the same sample rate and channel count; for a different sample rate
+// or channel count, create a new Decoder instead.
+func (dec *Decoder) Reset() error {
+	if dec.p == nil {
+		return errDecUninitialized
+	}
+	res := C.bridge_decoder_reset_state(dec.p)
+	if res != C.OPUS_OK {
+		return Error(res)
+	}
+	dec.state_version++
+	return nil
+}
+
+// StateVersion returns a counter that is incremented every time the
+// decoder's internal state is (re)initialized or reset. Comparing it before
+// and after an operation tells you whether prediction and FEC/PLC history
+// has been dropped.
+func (dec *Decoder) StateVersion() uint64 {
+	return dec.state_version
 }

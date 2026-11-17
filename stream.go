@@ -171,11 +171,17 @@ func (s *Stream) ReadFloat32(pcm []float32) (int, error) {
 	return int(n), nil
 }
 
+// Close releases the resources held by the stream, and closes the
+// underlying reader if it implements io.Closer. After Close, further Read
+// or Close calls return an error instead of touching freed memory.
 func (s *Stream) Close() error {
 	if s.oggfile == nil {
 		return fmt.Errorf("opus stream is uninitialized or already closed")
 	}
 	C.op_free(s.oggfile)
+	// Drop our reference before doing anything that can fail, so a second
+	// Close (or a Read) can't touch the freed libopusfile state.
+	s.oggfile = nil
 	if closer, ok := s.read.(io.Closer); ok {
 		return closer.Close()
 	}

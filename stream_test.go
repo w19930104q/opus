@@ -132,3 +132,29 @@ func TestCloser(t *testing.T) {
 		t.Error("Expected opus stream to call .Close on the reader")
 	}
 }
+
+func TestStreamCloseLifecycle(t *testing.T) {
+	f := mustOpenFile(t, "testdata/speech_8.opus")
+	mc := &mockCloser{Reader: f}
+	stream := mustOpenStream(t, mc)
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Error closing stream: %v", err)
+	}
+	if !mc.closed {
+		t.Error("Expected opus stream to call .Close on the reader")
+	}
+	// After Close, reads must fail cleanly instead of touching freed
+	// libopusfile memory.
+	if _, err := stream.Read(make([]int16, 100)); err == nil {
+		t.Error("Expected error reading from closed stream")
+	}
+	if _, err := stream.ReadFloat32(make([]float32, 100)); err == nil {
+		t.Error("Expected error reading float32 from closed stream")
+	}
+	// A second Close must return an error, not free the same state twice.
+	// The underlying reader must not be closed again either (mockCloser
+	// would return an "Already closed" error if it were).
+	if err := stream.Close(); err == nil {
+		t.Error("Expected error on double Close")
+	}
+}

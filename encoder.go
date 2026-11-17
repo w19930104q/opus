@@ -143,6 +143,9 @@ type Encoder struct {
 	// Memory for the encoder struct allocated on the Go heap to allow Go GC to
 	// manage it (and obviate need to free())
 	mem []byte
+	// state_version is incremented every time the underlying libopus state
+	// is (re)initialized or reset.
+	state_version uint64
 }
 
 // NewEncoder allocates a new Opus encoder and initializes it with the
@@ -167,17 +170,23 @@ func (enc *Encoder) Init(sample_rate int, channels int, application Application)
 		return fmt.Errorf("Number of channels must be 1 or 2: %d", channels)
 	}
 	size := C.opus_encoder_get_size(C.int(channels))
-	enc.channels = channels
-	enc.mem = make([]byte, size)
-	enc.p = (*C.OpusEncoder)(unsafe.Pointer(&enc.mem[0]))
+	// Initialize off to the side and only commit to the receiver once
+	// libopus reports success. A failed Init must leave the encoder
+	// untouched (and retryable), not half-initialized.
+	mem := make([]byte, size)
+	p := (*C.OpusEncoder)(unsafe.Pointer(&mem[0]))
 	errno := int(C.opus_encoder_init(
-		enc.p,
+		p,
 		C.opus_int32(sample_rate),
 		C.int(channels),
 		C.int(application)))
 	if errno != 0 {
 		return Error(int(errno))
 	}
+	enc.p = p
+	enc.mem = mem
+	enc.channels = channels
+	enc.state_version++
 	return nil
 }
 
@@ -241,6 +250,9 @@ func (enc *Encoder) EncodeFloat32(pcm []float32, data []byte) (int, error) {
 
 // SetDTX configures the encoder's use of discontinuous transmission (DTX).
 func (enc *Encoder) SetDTX(dtx bool) error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	i := 0
 	if dtx {
 		i = 1
@@ -255,6 +267,9 @@ func (enc *Encoder) SetDTX(dtx bool) error {
 // DTX reports whether this encoder is configured to use discontinuous
 // transmission (DTX).
 func (enc *Encoder) DTX() (bool, error) {
+	if enc.p == nil {
+		return false, errEncUninitialized
+	}
 	var dtx C.opus_int32
 	res := C.bridge_encoder_get_dtx(enc.p, &dtx)
 	if res != C.OPUS_OK {
@@ -266,6 +281,9 @@ func (enc *Encoder) DTX() (bool, error) {
 // InDTX returns whether the last encoded frame was either a comfort noise update
 // during DTX or not encoded because of DTX.
 func (enc *Encoder) InDTX() (bool, error) {
+	if enc.p == nil {
+		return false, errEncUninitialized
+	}
 	var inDTX C.opus_int32
 	res := C.bridge_encoder_get_in_dtx(enc.p, &inDTX)
 	if res != C.OPUS_OK {
@@ -276,6 +294,9 @@ func (enc *Encoder) InDTX() (bool, error) {
 
 // SampleRate returns the encoder sample rate in Hz.
 func (enc *Encoder) SampleRate() (int, error) {
+	if enc.p == nil {
+		return 0, errEncUninitialized
+	}
 	var sr C.opus_int32
 	res := C.bridge_encoder_get_sample_rate(enc.p, &sr)
 	if res != C.OPUS_OK {
@@ -286,6 +307,9 @@ func (enc *Encoder) SampleRate() (int, error) {
 
 // SetBitrate sets the bitrate of the Encoder
 func (enc *Encoder) SetBitrate(bitrate int) error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	res := C.bridge_encoder_set_bitrate(enc.p, C.opus_int32(bitrate))
 	if res != C.OPUS_OK {
 		return Error(res)
@@ -295,6 +319,9 @@ func (enc *Encoder) SetBitrate(bitrate int) error {
 
 // SetBitrateToAuto will allow the encoder to automatically set the bitrate
 func (enc *Encoder) SetBitrateToAuto() error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	res := C.bridge_encoder_set_bitrate(enc.p, C.opus_int32(C.OPUS_AUTO))
 	if res != C.OPUS_OK {
 		return Error(res)
@@ -305,6 +332,9 @@ func (enc *Encoder) SetBitrateToAuto() error {
 // SetBitrateToMax causes the encoder to use as much rate as it can. This can be
 // useful for controlling the rate by adjusting the output buffer size.
 func (enc *Encoder) SetBitrateToMax() error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	res := C.bridge_encoder_set_bitrate(enc.p, C.opus_int32(C.OPUS_BITRATE_MAX))
 	if res != C.OPUS_OK {
 		return Error(res)
@@ -314,6 +344,9 @@ func (enc *Encoder) SetBitrateToMax() error {
 
 // Bitrate returns the bitrate of the Encoder
 func (enc *Encoder) Bitrate() (int, error) {
+	if enc.p == nil {
+		return 0, errEncUninitialized
+	}
 	var bitrate C.opus_int32
 	res := C.bridge_encoder_get_bitrate(enc.p, &bitrate)
 	if res != C.OPUS_OK {
@@ -324,6 +357,9 @@ func (enc *Encoder) Bitrate() (int, error) {
 
 // SetComplexity sets the encoder's computational complexity
 func (enc *Encoder) SetComplexity(complexity int) error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	res := C.bridge_encoder_set_complexity(enc.p, C.opus_int32(complexity))
 	if res != C.OPUS_OK {
 		return Error(res)
@@ -333,6 +369,9 @@ func (enc *Encoder) SetComplexity(complexity int) error {
 
 // Complexity returns the computational complexity used by the encoder
 func (enc *Encoder) Complexity() (int, error) {
+	if enc.p == nil {
+		return 0, errEncUninitialized
+	}
 	var complexity C.opus_int32
 	res := C.bridge_encoder_get_complexity(enc.p, &complexity)
 	if res != C.OPUS_OK {
@@ -344,6 +383,9 @@ func (enc *Encoder) Complexity() (int, error) {
 // SetMaxBandwidth configures the maximum bandpass that the encoder will select
 // automatically
 func (enc *Encoder) SetMaxBandwidth(maxBw Bandwidth) error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	res := C.bridge_encoder_set_max_bandwidth(enc.p, C.opus_int32(maxBw))
 	if res != C.OPUS_OK {
 		return Error(res)
@@ -353,6 +395,9 @@ func (enc *Encoder) SetMaxBandwidth(maxBw Bandwidth) error {
 
 // MaxBandwidth gets the encoder's configured maximum allowed bandpass.
 func (enc *Encoder) MaxBandwidth() (Bandwidth, error) {
+	if enc.p == nil {
+		return 0, errEncUninitialized
+	}
 	var maxBw C.opus_int32
 	res := C.bridge_encoder_get_max_bandwidth(enc.p, &maxBw)
 	if res != C.OPUS_OK {
@@ -364,6 +409,9 @@ func (enc *Encoder) MaxBandwidth() (Bandwidth, error) {
 // SetInBandFEC configures the encoder's use of inband forward error
 // correction (FEC)
 func (enc *Encoder) SetInBandFEC(fec bool) error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	i := 0
 	if fec {
 		i = 1
@@ -377,6 +425,9 @@ func (enc *Encoder) SetInBandFEC(fec bool) error {
 
 // InBandFEC gets the encoder's configured inband forward error correction (FEC)
 func (enc *Encoder) InBandFEC() (bool, error) {
+	if enc.p == nil {
+		return false, errEncUninitialized
+	}
 	var fec C.opus_int32
 	res := C.bridge_encoder_get_inband_fec(enc.p, &fec)
 	if res != C.OPUS_OK {
@@ -387,6 +438,9 @@ func (enc *Encoder) InBandFEC() (bool, error) {
 
 // SetPacketLossPerc configures the encoder's expected packet loss percentage.
 func (enc *Encoder) SetPacketLossPerc(lossPerc int) error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	res := C.bridge_encoder_set_packet_loss_perc(enc.p, C.opus_int32(lossPerc))
 	if res != C.OPUS_OK {
 		return Error(res)
@@ -396,6 +450,9 @@ func (enc *Encoder) SetPacketLossPerc(lossPerc int) error {
 
 // PacketLossPerc gets the encoder's configured packet loss percentage.
 func (enc *Encoder) PacketLossPerc() (int, error) {
+	if enc.p == nil {
+		return 0, errEncUninitialized
+	}
 	var lossPerc C.opus_int32
 	res := C.bridge_encoder_get_packet_loss_perc(enc.p, &lossPerc)
 	if res != C.OPUS_OK {
@@ -404,17 +461,34 @@ func (enc *Encoder) PacketLossPerc() (int, error) {
 	return int(lossPerc), nil
 }
 
-// Reset resets the codec state to be equivalent to a freshly initialized state.
+// Reset resets the codec state to be equivalent to a freshly initialized
+// state. All prediction history accumulated from previously encoded frames
+// is dropped; configuration (bitrate, VBR, FEC, ...) is preserved.
 func (enc *Encoder) Reset() error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	res := C.bridge_encoder_reset_state(enc.p)
 	if res != C.OPUS_OK {
 		return Error(res)
 	}
+	enc.state_version++
 	return nil
+}
+
+// StateVersion returns a counter that is incremented every time the
+// encoder's internal state is (re)initialized or reset. Comparing it before
+// and after an operation tells you whether prediction history has been
+// dropped.
+func (enc *Encoder) StateVersion() uint64 {
+	return enc.state_version
 }
 
 // SetVBR configures the encoder's use of variable bitrate (VBR).
 func (enc *Encoder) SetVBR(vbr bool) error {
+	if enc.p == nil {
+		return errEncUninitialized
+	}
 	i := 0
 	if vbr {
 		i = 1
@@ -428,6 +502,9 @@ func (enc *Encoder) SetVBR(vbr bool) error {
 
 // VBR reports whether this encoder is configured to use variable bitrate (VBR).
 func (enc *Encoder) VBR() (bool, error) {
+	if enc.p == nil {
+		return false, errEncUninitialized
+	}
 	var vbr C.opus_int32
 	res := C.bridge_encoder_get_vbr(enc.p, &vbr)
 	if res != C.OPUS_OK {
